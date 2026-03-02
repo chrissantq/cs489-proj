@@ -1,5 +1,3 @@
-#include <cmath>
-
 // analog pins
 #define MICPIN A0
 
@@ -48,7 +46,7 @@ void setup() {
   // set relay to respective bit value to toggle
   // 74hc595 chip output (00000010 through 00010000)
   for (int i = 0; i < 4; i++) {
-    devtab[RELAY][i] = std::pow(2, i+1);
+    devtab[RELAY][i] = 1 << (i+1);
   }
 
 }
@@ -70,7 +68,7 @@ void updateRelay(int devnum) {
   shiftOut(DATAPIN, CLOCKPIN, MSBFIRST, chipstate);
   digitalWrite(LATCHPIN, HIGH);
   // play little tone on speaker
-  tone(AUDIOPIN, 100, 150);
+  tone(AUDIOPIN, 100*devnum, 150);
   delay(150);
   tone(AUDIOPIN, 200, 50);
   delay(50);
@@ -79,8 +77,8 @@ void updateRelay(int devnum) {
 void loop() {
   if (toggled) {
     toggled = false;
+    updateRelay(devnum);
     devnum = (devnum + 1) % 4; // for now just cycle between the relays
                              // later, will be chosen based off command
-    updateRelay(devnum);
   }
 }
