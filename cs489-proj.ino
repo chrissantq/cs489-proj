@@ -44,8 +44,8 @@ typedef struct microphone_dev {
 void * devtab[NDEVS][NDEV_INST] = {0};
 
 byte chipstate = 0b00000000; // current state of the 74hc595 chip
-int noise_avg = 512;
-volatile int devnum = 0; // not volatile rn, prob will be later
+int noise_avg = 512;         // noise avg detected by mic of room
+volatile int devnum = 0;     // not volatile rn, prob will be later
 volatile bool toggled = false;
 volatile unsigned long lastPressTime = 0;
 
@@ -109,6 +109,19 @@ void updateRelay(relay_t* relay) {
   delay(50);
 }
 
+// polls the microphone for a clap
+void micDetection(mic_t* mic) {
+  mic->reading = analogRead(mic->pin);
+  noise_avg = (noise_avg * 15 + mic->reading) / 16;
+  if (abs(mic->reading - noise_avg) > mic->threshold) {
+    delay(10); // detect short burst of sound (ie clap)
+    mic->reading = analogRead(mic->pin);
+    if (abs(mic->reading - noise_avg) < (mic->threshold / 2)) {
+      toggled = true;
+    }
+  }
+}
+
 void loop() {
   if (toggled) {
     toggled = false;
@@ -122,15 +135,7 @@ void loop() {
   // prob switch to interrupts using LM393 chip to be more
   // reliable, this works decently well tho for now
   mic_t * mic = (mic_t*)devtab[MICID][0];
-  mic->reading = analogRead(mic->pin);
-  noise_avg = (noise_avg * 15 + mic->reading) / 16;
-  if (abs(mic->reading - noise_avg) > mic->threshold) {
-    delay(10); // detect short burst of sound (ie clap)
-    mic->reading = analogRead(mic->pin);
-    if (abs(mic->reading - noise_avg) < (mic->threshold / 2)) {
-      toggled = true;
-    }
-  }
+  micDetection(mic);
 
 
 }
