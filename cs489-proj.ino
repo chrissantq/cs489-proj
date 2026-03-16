@@ -1,7 +1,7 @@
 #include <cstdlib>
 #include <WiFi.h>
 #include <WiFiUdp.h>
-#include <IntervalTimer.h>
+#include "FspTimer.h"
 
 // digital pins
 #define TOGGLEPIN 2 // right now button to toggle relay, eventually
@@ -45,10 +45,8 @@ typedef struct microphone_dev {
 // pseudodevice used to hold server information and other wifi data
 typedef struct wifi_dev {
   int devnum;
-  char * ssid;      // network name
-  char * pass;      // network password
-  const int serverIP[4]; // server ip (store each part separate in arr)
-  const int serverPort;  // server port
+  int serverIP[4]; // server ip (store each part separate in arr)
+  int serverPort;  // server port
   volatile uint8_t recv_buf[RECV_BUF_SIZE];    // recv data buffer
   volatile uint8_t send_buf[SEND_BUF_SIZE];    // send data buffer
   volatile int s_idx;    // index in send buffer
@@ -67,13 +65,47 @@ typedef struct wifi_dev {
 void * devtab[NDEVS][NDEV_INST] = {0};
 
 // timer to interrupt for audio sampling
-IntervalTimer audioTimer;
+FspTimer audioTimer;
+
+// wifi connections
+WiFiUDP udp;
+const char * ssid = "wifi";
+const char * pass = "pass";
+const int local_port = 12345;
 
 byte chipstate = 0b00000000; // current state of the 74hc595 chip
 int noise_avg = 512;         // noise avg detected by mic of room
 volatile int devnum = 0;     // not volatile rn, prob will be later
 volatile bool toggled = false;
 volatile unsigned long lastPressTime = 0;
+
+// set up wifi device(s)
+void wifi_setup() {
+
+  // whisper server (localhost:1223 for now)
+  wifi_t * whisper = (wifi_t*)malloc(sizeof(wifi_t));
+  whisper->devnum = 0;
+  whisper->serverIP[0] = 127; whisper->serverIP[1] = 0;
+  whisper->serverIP[2] = 0; whisper->serverIP[3] = 1;
+  whisper->serverPort = 1223;
+  memset((void*)whisper->recv_buf, 0, sizeof(whisper->recv_buf));
+  memset((void*)whisper->send_buf, 0, sizeof(whisper->send_buf));
+  whisper->s_idx = 0;
+  whisper->r_idx = 0;
+  whisper->pkt_rdy = false;
+  devtab[WIFIID][0] = whisper;
+
+}
+
+// connect to wifi
+void wifi_connect() {
+
+  while (WiFi.begin(ssid, pass) != WL_CONNECTED) {
+    delay(1000);
+  }
+  udp.begin(local_port);
+
+}
 
 // device setup function
 void devinit() {
@@ -93,8 +125,12 @@ void devinit() {
   microphone->threshold = 300;
   microphone->pin = A5;
   microphone->reading = 0;
-  microphone->buffer = {0};
+  memset(microphone->buffer, 0, sizeof(microphone->buffer));
   devtab[MICID][microphone->devnum] = microphone;
+
+  // set up wifi device connection(s);
+  wifi_setup();
+  wifi_connect();
 
 }
 
@@ -106,20 +142,19 @@ void setup() {
   pinMode(AUDIOPIN, OUTPUT);
   pinMode(TOGGLEPIN, INPUT_PULLUP);
 
-  // interrupts: button, audio sampling
+  // interrupt for button
   attachInterrupt(digitalPinToInterrupt(TOGGLEPIN), toggleISR, FALLING);
-  audioTimer.begin(audioSampleISR, 62.5);
+
+  // audio timer setup
+  uint8_t timer_type = GPT_TIMER;
+  int8_t timer_idx = FspTimer::get_available_timer(timer_type);
+  audioTimer.begin(TIMER_MODE_PERIODIC, timer_type, timer_idx,
+                   16000, 0.0, audioSampleISR);
+  audioTimer.start();
 
   // init devices
   devinit();
 
-  // wifi init
-  WiFiUDP udp;
-  const char* ssid = "wifi";
-  const char* pass = "pass";
-
-  IPAddress serverIP(192,168,1,100);
-  const int serverPort = 9000;
 
 }
 
@@ -147,16 +182,16 @@ void updateRelay(relay_t* relay) {
 }
 
 // interrupt to record audio every ~62 microsec (16kHz)
-void audioSampleISR() {
+void audioSampleISR(timer_callback_args_t* args) {
   mic_t * mic = (mic_t*)devtab[MICID][0];
   wifi_t * whisper = (wifi_t*)devtab[WIFIID][0];
   mic->reading = analogRead(mic->pin);
-  int center = raw - 2048;
+  int center = mic->reading - 2048;
   int16_t pcm = center << 4;
-  whisper->sendBuffer[whisper->s_idx] = pcm;
+  whisper->send_buf[whisper->s_idx] = pcm;
   whisper->s_idx += 2; // each pcm 2 bytes
   if (whisper->s_idx >= PACKET_SAMPLES) {
-    whisper->pkt_ready = true;
+    whisper->pkt_rdy = true;
     whisper->s_idx = 0;
   }
 }
@@ -177,7 +212,9 @@ void micDetection(mic_t* mic) {
 // function to send udp packet of data from send_buf to
 // corresponding server destination
 void sendUDP(wifi_t* dest) {
-  udp.beginPacket(dest->serverIP, dest->serverPort);
+  IPAddress ip(dest->serverIP[0], dest->serverIP[1],
+               dest->serverIP[2], dest->serverIP[3]);
+  udp.beginPacket(ip, dest->serverPort);
   udp.write((uint8_t*)dest->send_buf, sizeof(dest->send_buf));
   udp.endPacket();
 }
@@ -198,7 +235,7 @@ void loop() {
   micDetection(mic);
 
   wifi_t * whisper = (wifi_t*)devtab[WIFIID][0];
-  if (whisper->pkt_ready) {sendUDP(whisper)};
+  if (whisper->pkt_rdy) {sendUDP(whisper);}
 
 
 }
