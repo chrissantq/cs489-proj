@@ -186,9 +186,10 @@ void audioSampleISR(timer_callback_args_t* args) {
   mic_t * mic = (mic_t*)devtab[MICID][0];
   wifi_t * whisper = (wifi_t*)devtab[WIFIID][0];
   mic->reading = analogRead(mic->pin);
+  // convert reading to pcm (whisper uses this format)
   int center = mic->reading - 2048;
   int16_t pcm = center << 4;
-  whisper->send_buf[whisper->s_idx] = pcm;
+  memcpy((void*)&whisper->send_buf[whisper->s_idx], &pcm, sizeof(pcm));
   whisper->s_idx += 2; // each pcm 2 bytes
   if (whisper->s_idx >= PACKET_SAMPLES) {
     whisper->pkt_rdy = true;
@@ -219,6 +220,18 @@ void sendUDP(wifi_t* dest) {
   udp.endPacket();
 }
 
+// recieve data from src to the receive buffer
+void recvUDP(wifi_t* src) {
+  int pktSize = udp.parsePacket();
+  if (pktSize) {
+    int len = udp.read((uint8_t*)src->recv_buf, RECV_BUF_SIZE - 1);
+    if (len > 0) {
+      src->recv_buf[len] = '\0';
+      src->r_idx = len;
+    }
+  }
+}
+
 void loop() {
   if (toggled) {
     toggled = false;
@@ -235,7 +248,8 @@ void loop() {
   micDetection(mic);
 
   wifi_t * whisper = (wifi_t*)devtab[WIFIID][0];
-  if (whisper->pkt_rdy) {sendUDP(whisper);}
+  if (whisper->pkt_rdy) {sendUDP(whisper);} // send if ready
+  recvUDP(whisper); // check for packet (if r_len > 0)
 
 
 }
