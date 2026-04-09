@@ -38,7 +38,7 @@ int main() {
     return -1;
   }
 
-  std::vector<int16_t> pcm_audio_buf(PACKET_SAMPLES);
+  std::vector<int16_t> pcm16_buffer(PACKET_SAMPLES);
   uint8_t recv_buf[BUFFER_SIZE];
   socklen_t len = sizeof(cliaddr);
 

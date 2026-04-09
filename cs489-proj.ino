@@ -17,15 +17,15 @@
 #define NRELAYS 4    // number of relays
 
 // device ids
-#define RELAYID 0
-#define MICID 1
+#define MICID 0
+#define RELAYID 1
 #define WIFIID 2
 
 // other constants
 #define DEBOUNCE 200 // ignore button inputs within 200ms of last
 #define PACKET_SAMPLES 320 // audio sample size to send via udp
 #define SEND_BUF_SIZE 640 // send buf big -> PACKET_SAMPLES * 2 bytes
-#define RECV_BUF_SIZE 120 // recv buf smaller, just simple command
+#define RECV_BUF_SIZE 120 // recv buf smaller, just simple commands
 
 // device structs
 typedef struct relay_dev {
@@ -42,6 +42,12 @@ typedef struct microphone_dev {
   int reading;    // microphone analogread
 } mic_t;
 
+// wifi_t bool macros
+#define SEND 0
+#define RECV 1
+#define TOGGLE_RDY(x, pos) ((x) ^= (1 << (pos))) 
+#define CHECK_RDY(x, pos) ((x & (1 << (pos)))
+
 // pseudodevice used to hold server information and other wifi data
 typedef struct wifi_dev {
   int devnum;
@@ -51,7 +57,8 @@ typedef struct wifi_dev {
   volatile uint8_t send_buf[SEND_BUF_SIZE];    // send data buffer
   volatile int s_idx;    // index in send buffer
   volatile int r_idx;    // index in recv buffer
-  volatile bool pkt_rdy; // if packet is ready to send
+  volatile int pkt_rdy; // if packet is ready to send
+                        // pos 0 = send, pos 1 = recv
 } wifi_t;
 
 /*
@@ -63,6 +70,18 @@ typedef struct wifi_dev {
 *   2 -> wifi pseudodevice
 */
 void * devtab[NDEVS][NDEV_INST] = {0};
+
+/*
+ *  CMD table
+ *  rows: cmd type (system, relay, bluetooth, etc)
+ *  cols: cmd number
+ *
+ *  CMD ID = [row]*10 + [col]
+ *  0: system
+ *  1: relays
+ *  2: bluetooth
+ *
+ */
 
 // timer to interrupt for audio sampling
 FspTimer audioTimer;
@@ -92,7 +111,7 @@ void wifi_setup() {
   memset((void*)whisper->send_buf, 0, sizeof(whisper->send_buf));
   whisper->s_idx = 0;
   whisper->r_idx = 0;
-  whisper->pkt_rdy = false;
+  whisper->pkt_rdy = 0;
   devtab[WIFIID][0] = whisper;
 
 }
@@ -192,7 +211,7 @@ void audioSampleISR(timer_callback_args_t* args) {
   memcpy((void*)&whisper->send_buf[whisper->s_idx], &pcm, sizeof(pcm));
   whisper->s_idx += 2; // each pcm 2 bytes
   if (whisper->s_idx >= PACKET_SAMPLES) {
-    whisper->pkt_rdy = true;
+    TOGGLE_RDY(whisper->pkt_rdy, SEND);
     whisper->s_idx = 0;
   }
 }
@@ -220,7 +239,7 @@ void sendUDP(wifi_t* dest) {
   udp.endPacket();
 }
 
-// recieve data from src to the receive buffer
+// receive data from src to the receive buffer
 void recvUDP(wifi_t* src) {
   int pktSize = udp.parsePacket();
   if (pktSize) {
@@ -228,8 +247,45 @@ void recvUDP(wifi_t* src) {
     if (len > 0) {
       src->recv_buf[len] = '\0';
       src->r_idx = len;
+      TOGGLE_RDY(src->pkt_rdy, RECV);
     }
   }
+}
+
+// parse cmd recv from whisper packet
+// return command id number
+int parseCmd(wifi_t* whisper) {
+ 
+  //TODO: parse command
+
+}
+
+
+// execute command
+#define SYSCMDID 0
+// reuse RELAYID 1
+#define BTCMDID 2
+void doCmd(int cmdId) {
+
+  int type = cmdId / 10;
+  int num = cmdId % 10;
+  
+  switch (type) {
+    case SYSCMDID:
+      // add system pseudodevice to devtab similar to relays
+      break;
+    case RELAYID:
+      relay_t * relay = (relay_t*)devtab[RELAYID][col];
+      updateRelay(relay);
+      break;
+    case BTCMDID:
+      // idk how these will be implemented if at all 
+      break;
+    default:
+      // do nothing
+      break;
+  }
+
 }
 
 void loop() {
@@ -248,8 +304,14 @@ void loop() {
   micDetection(mic);
 
   wifi_t * whisper = (wifi_t*)devtab[WIFIID][0];
-  if (whisper->pkt_rdy) {sendUDP(whisper);} // send if ready
+  if (CHECK_RDY(whisper->pkt_rdy), SEND) {sendUDP(whisper);} // send if ready
   recvUDP(whisper); // check for packet (if r_len > 0)
+
+  // if command received, process and execute
+  if (CHECK_RDY(whisper->pkt_rdy), RECV) {
+    int cmdId = parseCmd(whisper);
+    doCmd(cmdId);
+  }
 
 
 }
