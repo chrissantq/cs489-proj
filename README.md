@@ -1,8 +1,8 @@
 # CS 48900 - Embedded Systems Project
 --------------------------------------------
-Christopher Quinney - 
-Shafer Hofmann - 
-James - 
-Il - 
+Christopher Quinney - <br>
+Shafer Hofmann - <br>
+James - <br>
+Il - <br>
 
 ## Files
