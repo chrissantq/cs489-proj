@@ -3,8 +3,9 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <unistd.h>
+#include <vector>
 
-#include "whisper.h"
+//#include "whisper.h"
 
 #define PORT 1223
 #define PACKET_SAMPLES 320
@@ -30,6 +31,7 @@ int main() {
   servaddr.sin_addr.s_addr = INADDR_ANY;
   servaddr.sin_port = htons(PORT);
 
+
   // bind socket to server addr
   if (bind(sockfd, (const struct sockaddr *)&servaddr, 
            sizeof(servaddr)) < 0) {
@@ -51,14 +53,17 @@ int main() {
     // if packet data:
     if (n > 0) {
       // cpy raw to 16-bit pcm buffer, convert to float
-      std::memcpy(pcm16_buffer.data(), recv_buffer, n);
+      std::memcpy(pcm16_buffer.data(), recv_buf, n);
       std::vector<float> pcmf(n/2); // ea sample 2 bytes
       for (size_t i = 0; i < pcmf.size(); ++i) {
         // (in range -32768 -> 32767, whisper requires -1.0 to 1.0)
         pcmf[i] = (float) pcm16_buffer[i] / 32768.0f;
+        printf("%f\n", pcmf[i]);
       }
 
       // TODO: pass to whisper for processing
+
+      
 
     }
 

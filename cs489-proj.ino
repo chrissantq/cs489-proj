@@ -45,8 +45,9 @@ typedef struct microphone_dev {
 // wifi_t bool macros
 #define SEND 0
 #define RECV 1
-#define TOGGLE_RDY(x, pos) ((x) ^= (1 << (pos))) 
-#define CHECK_RDY(x, pos) ((x & (1 << (pos)))
+#define SET_RDY(x, pos) ((x) |= (1 << (pos)))
+#define CLEAR_RDY(x, pos) ((x) &= ~(1 << (pos)))
+#define CHECK_RDY(x, pos) ((x & (1 << (pos))))
 
 // pseudodevice used to hold server information and other wifi data
 typedef struct wifi_dev {
@@ -88,12 +89,12 @@ FspTimer audioTimer;
 
 // wifi connections
 WiFiUDP udp;
-const char * ssid = "wifi";
-const char * pass = "pass";
-const int local_port = 12345;
+const char * ssid = "McDonald's Free Wifi";
+const char * pass = "AKAK608Waldro";
+const int local_port = 1223;
 
 byte chipstate = 0b00000000; // current state of the 74hc595 chip
-int noise_avg = 512;         // noise avg detected by mic of room
+volatile int noise_avg = 1024; // noise avg detected by mic of room
 volatile int devnum = 0;     // not volatile rn, prob will be later
 volatile bool toggled = false;
 volatile unsigned long lastPressTime = 0;
@@ -104,8 +105,8 @@ void wifi_setup() {
   // whisper server (localhost:1223 for now)
   wifi_t * whisper = (wifi_t*)malloc(sizeof(wifi_t));
   whisper->devnum = 0;
-  whisper->serverIP[0] = 127; whisper->serverIP[1] = 0;
-  whisper->serverIP[2] = 0; whisper->serverIP[3] = 1;
+  whisper->serverIP[0] = 192; whisper->serverIP[1] = 168;
+  whisper->serverIP[2] = 1; whisper->serverIP[3] = 63;
   whisper->serverPort = 1223;
   memset((void*)whisper->recv_buf, 0, sizeof(whisper->recv_buf));
   memset((void*)whisper->send_buf, 0, sizeof(whisper->send_buf));
@@ -119,9 +120,13 @@ void wifi_setup() {
 // connect to wifi
 void wifi_connect() {
 
-  while (WiFi.begin(ssid, pass) != WL_CONNECTED) {
-    delay(1000);
+  Serial.print("Connecting to WiFi...");
+  WiFi.begin(ssid, pass);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
   }
+  Serial.println("\nConnected!");
   udp.begin(local_port);
 
 }
@@ -160,19 +165,27 @@ void setup() {
   pinMode(LATCHPIN, OUTPUT);
   pinMode(AUDIOPIN, OUTPUT);
   pinMode(TOGGLEPIN, INPUT_PULLUP);
+  analogReadResolution(12);
 
   // interrupt for button
   attachInterrupt(digitalPinToInterrupt(TOGGLEPIN), toggleISR, FALLING);
+
+  // init devices
+  Serial.println("Initializing devices...");
+  devinit();
+  Serial.println("Devices initialized.");
 
   // audio timer setup
   uint8_t timer_type = GPT_TIMER;
   int8_t timer_idx = FspTimer::get_available_timer(timer_type);
   audioTimer.begin(TIMER_MODE_PERIODIC, timer_type, timer_idx,
-                   16000, 0.0, audioSampleISR);
+                   8000, 0.0, audioSampleISR);
+  audioTimer.setup_overflow_irq();
+  audioTimer.open();
   audioTimer.start();
 
-  // init devices
-  devinit();
+  Serial.println("Audio timer started.");
+
 
 
 }
@@ -206,20 +219,18 @@ void audioSampleISR(timer_callback_args_t* args) {
   wifi_t * whisper = (wifi_t*)devtab[WIFIID][0];
   mic->reading = analogRead(mic->pin);
   // convert reading to pcm (whisper uses this format)
-  int center = mic->reading - 2048;
-  int16_t pcm = center << 4;
+  int center = mic->reading - noise_avg;
+  int16_t pcm = (int16_t)constrain(center << 4, -32768, 32767);
   memcpy((void*)&whisper->send_buf[whisper->s_idx], &pcm, sizeof(pcm));
   whisper->s_idx += 2; // each pcm 2 bytes
-  if (whisper->s_idx >= PACKET_SAMPLES) {
-    TOGGLE_RDY(whisper->pkt_rdy, SEND);
+  if (whisper->s_idx >= SEND_BUF_SIZE) {
+    SET_RDY(whisper->pkt_rdy, SEND);
     whisper->s_idx = 0;
   }
 }
 
 // polls the microphone for a clap
 void micDetection(mic_t* mic) {
-  mic->reading = analogRead(mic->pin);
-  noise_avg = (noise_avg * 15 + mic->reading) / 16;
   if (abs(mic->reading - noise_avg) > mic->threshold) {
     delay(10); // detect short burst of sound (ie clap)
     mic->reading = analogRead(mic->pin);
@@ -247,7 +258,7 @@ void recvUDP(wifi_t* src) {
     if (len > 0) {
       src->recv_buf[len] = '\0';
       src->r_idx = len;
-      TOGGLE_RDY(src->pkt_rdy, RECV);
+      SET_RDY(src->pkt_rdy, RECV);
     }
   }
 }
@@ -274,15 +285,16 @@ void doCmd(int cmdId) {
     case SYSCMDID:
       // add system pseudodevice to devtab similar to relays
       break;
-    case RELAYID:
-      relay_t * relay = (relay_t*)devtab[RELAYID][col];
+    case RELAYID: {
+      relay_t * relay = (relay_t*)devtab[RELAYID][num];
       updateRelay(relay);
       break;
+    }
     case BTCMDID:
       // idk how these will be implemented if at all 
       break;
     default:
-      // do nothing
+      // light up red led to show fail or something
       break;
   }
 
@@ -296,22 +308,33 @@ void loop() {
     devnum = (devnum + 1) % 4; // for now just cycle between the relays
                              // later, will be chosen based off command
   }
+  mic_t * mic = (mic_t*)devtab[MICID][0];
+  noise_avg = (noise_avg * 63 + mic->reading) / 64;
+
 
   // poll mic for loud noise (ie clap) to toggle
   // prob switch to interrupts using LM393 chip to be more
   // reliable, this works decently well tho for now
-  mic_t * mic = (mic_t*)devtab[MICID][0];
-  micDetection(mic);
+  //micDetection(mic);
 
   wifi_t * whisper = (wifi_t*)devtab[WIFIID][0];
-  if (CHECK_RDY(whisper->pkt_rdy), SEND) {sendUDP(whisper);} // send if ready
+  Serial.println(whisper->send_buf[0]);
+  Serial.println(whisper->send_buf[1]);
+  if (CHECK_RDY(whisper->pkt_rdy, SEND)) {
+    sendUDP(whisper);
+    CLEAR_RDY(whisper->pkt_rdy, SEND);
+  }
   recvUDP(whisper); // check for packet (if r_len > 0)
 
+  /*
+  memcpy((void*)&whisper->send_buf, "HELLO WORLD", 11);
+  sendUDP(whisper);
+  */
+
   // if command received, process and execute
-  if (CHECK_RDY(whisper->pkt_rdy), RECV) {
+  if (CHECK_RDY(whisper->pkt_rdy, RECV)) {
     int cmdId = parseCmd(whisper);
     doCmd(cmdId);
   }
-
 
 }
