@@ -318,8 +318,6 @@ void loop() {
   //micDetection(mic);
 
   wifi_t * whisper = (wifi_t*)devtab[WIFIID][0];
-  Serial.println(whisper->send_buf[0]);
-  Serial.println(whisper->send_buf[1]);
   if (CHECK_RDY(whisper->pkt_rdy, SEND)) {
     sendUDP(whisper);
     CLEAR_RDY(whisper->pkt_rdy, SEND);
