@@ -63,6 +63,7 @@ typedef struct wifi_dev {
   volatile uint8_t send_buf[2][SEND_BUF_SIZE];    // send data buffer
   volatile int active_buf; // which buf ISR is writing to
   volatile int ready_buf; // which buf is ready to send
+  volatile int sending;   // which buf is actively sending
   volatile int s_idx;    // index in send buffer
   volatile int r_idx;    // index in recv buffer
   volatile int pkt_rdy; // if packet is ready to send
@@ -124,6 +125,7 @@ void wifi_setup() {
   whisper->seq = 0;
   whisper->active_buf = 0;
   whisper->ready_buf = 0;
+  whisper->sending = -1;
   devtab[WIFIID][0] = whisper;
 
 }
@@ -232,20 +234,35 @@ void audioSampleISR(timer_callback_args_t* args) {
 
   if (!mic || !whisper) return;
 
+  if (whisper->s_idx >= PACKET_SAMPLES * 2) {
+    whisper->s_idx = PACKET_SAMPLES * 2;
+  }
+
   mic->reading = analogRead(mic->pin);
   float centered = (float)mic->reading - baseline;
   int16_t pcm = (int16_t)constrain(centered * GAIN, -32768.0f, 32767.0f);
 
   int offset = HEADER_SIZE + whisper->s_idx;
+  if (whisper->s_idx + HEADER_SIZE + 2 > SEND_BUF_SIZE) {
+    whisper->s_idx = 0;
+    return;
+  }
   memcpy((void*)&whisper->send_buf[whisper->active_buf][offset],
          &pcm, sizeof(pcm));
   whisper->s_idx += 2; // each pcm 2 bytes
 
   if (whisper->s_idx >= PACKET_SAMPLES * 2) {
-    whisper->ready_buf = whisper->active_buf; // hand off full buffer
-    whisper->active_buf ^= 1; // switch to other buffer
-    SET_RDY(whisper->pkt_rdy, SEND);
+    int finished = whisper->active_buf;
+    int next = finished ^ 1;
+
+    if (next == whisper->sending) {
+      whisper->s_idx = 0;
+      return; // dont overwrite sending
+    }
+    whisper->ready_buf = finished; // hand off full buffer
+    whisper->active_buf = next; // switch to other buffer
     whisper->s_idx = 0;
+    SET_RDY(whisper->pkt_rdy, SEND);
   }
 }
 
@@ -265,7 +282,20 @@ void micDetection(mic_t* mic) {
 // function to send udp packet of data from send_buf to
 // corresponding server destination
 void sendUDP(wifi_t* dest) {
-  int buf = dest->ready_buf;
+
+  int buf;
+
+  // disable interrupts to grab data
+  noInterrupts();
+  if (!CHECK_RDY(dest->pkt_rdy, SEND)) {
+    interrupts();
+    return;
+  }
+  buf = dest->ready_buf;
+  dest->sending = buf;
+  CLEAR_RDY(dest->pkt_rdy, SEND);
+  interrupts();
+
 
   uint16_t magic = MAGIC;
   uint16_t seq = dest->seq++;
@@ -291,6 +321,8 @@ void sendUDP(wifi_t* dest) {
   udp.beginPacket(ip, dest->serverPort);
   udp.write((uint8_t*)dest->send_buf[buf], SEND_BUF_SIZE);
   udp.endPacket();
+
+  dest->sending = -1; // release buffer
 }
 
 // receive data from src to the receive buffer
@@ -360,11 +392,15 @@ void loop() {
   //micDetection(mic);
 
   wifi_t * whisper = (wifi_t*)devtab[WIFIID][0];
+
+  if (!whisper) return;
+
+  // send if ready
   if (CHECK_RDY(whisper->pkt_rdy, SEND)) {
     sendUDP(whisper);
-    Serial.println("pkt sent");
-    CLEAR_RDY(whisper->pkt_rdy, SEND);
+    Serial.println("sent");
   }
+
   recvUDP(whisper); // check for packet (if r_len > 0)
 
   // if command received, process and execute
