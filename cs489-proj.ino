@@ -21,11 +21,16 @@
 #define RELAYID 1
 #define WIFIID 2
 
+// audio and packet constants
+#define PACKET_SAMPLES 320 // audio sample size to send via udp
+#define MAGIC 0xA5B4
+#define HEADER_SIZE 8 // 2 magic + 2 seq + 2 n samples + 2 checksum
+#define SEND_BUF_SIZE (PACKET_SAMPLES * 2 + HEADER_SIZE) // 648 bytes
+#define RECV_BUF_SIZE 120 // recv buf smaller, just simple commands
+#define GAIN 16.0f
+
 // other constants
 #define DEBOUNCE 200 // ignore button inputs within 200ms of last
-#define PACKET_SAMPLES 320 // audio sample size to send via udp
-#define SEND_BUF_SIZE 640 // send buf big -> PACKET_SAMPLES * 2 bytes
-#define RECV_BUF_SIZE 120 // recv buf smaller, just simple commands
 
 // device structs
 typedef struct relay_dev {
@@ -55,11 +60,14 @@ typedef struct wifi_dev {
   int serverIP[4]; // server ip (store each part separate in arr)
   int serverPort;  // server port
   volatile uint8_t recv_buf[RECV_BUF_SIZE];    // recv data buffer
-  volatile uint8_t send_buf[SEND_BUF_SIZE];    // send data buffer
+  volatile uint8_t send_buf[2][SEND_BUF_SIZE];    // send data buffer
+  volatile int active_buf; // which buf ISR is writing to
+  volatile int ready_buf; // which buf is ready to send
   volatile int s_idx;    // index in send buffer
   volatile int r_idx;    // index in recv buffer
   volatile int pkt_rdy; // if packet is ready to send
                         // pos 0 = send, pos 1 = recv
+  volatile uint16_t seq;
 } wifi_t;
 
 /*
@@ -94,7 +102,7 @@ const char * pass = "AKAK608Waldro";
 const int local_port = 1223;
 
 byte chipstate = 0b00000000; // current state of the 74hc595 chip
-volatile int noise_avg = 1024; // noise avg detected by mic of room
+float baseline = 2048.0f;            // base room volume level
 volatile int devnum = 0;     // not volatile rn, prob will be later
 volatile bool toggled = false;
 volatile unsigned long lastPressTime = 0;
@@ -113,6 +121,9 @@ void wifi_setup() {
   whisper->s_idx = 0;
   whisper->r_idx = 0;
   whisper->pkt_rdy = 0;
+  whisper->seq = 0;
+  whisper->active_buf = 0;
+  whisper->ready_buf = 0;
   devtab[WIFIID][0] = whisper;
 
 }
@@ -179,14 +190,15 @@ void setup() {
   uint8_t timer_type = GPT_TIMER;
   int8_t timer_idx = FspTimer::get_available_timer(timer_type);
   audioTimer.begin(TIMER_MODE_PERIODIC, timer_type, timer_idx,
-                   8000, 0.0, audioSampleISR);
+                   16000, 0.0, audioSampleISR);
   audioTimer.setup_overflow_irq();
   audioTimer.open();
   audioTimer.start();
 
   Serial.println("Audio timer started.");
 
-
+  mic_t * mic = (mic_t*)devtab[MICID][0];
+  baseline = analogRead(mic->pin);
 
 }
 
@@ -217,19 +229,28 @@ void updateRelay(relay_t* relay) {
 void audioSampleISR(timer_callback_args_t* args) {
   mic_t * mic = (mic_t*)devtab[MICID][0];
   wifi_t * whisper = (wifi_t*)devtab[WIFIID][0];
+
+  if (!mic || !whisper) return;
+
   mic->reading = analogRead(mic->pin);
-  // convert reading to pcm (whisper uses this format)
-  int center = mic->reading - noise_avg;
-  int16_t pcm = (int16_t)constrain(center << 4, -32768, 32767);
-  memcpy((void*)&whisper->send_buf[whisper->s_idx], &pcm, sizeof(pcm));
+  float centered = (float)mic->reading - baseline;
+  int16_t pcm = (int16_t)constrain(centered * GAIN, -32768.0f, 32767.0f);
+
+  int offset = HEADER_SIZE + whisper->s_idx;
+  memcpy((void*)&whisper->send_buf[whisper->active_buf][offset],
+         &pcm, sizeof(pcm));
   whisper->s_idx += 2; // each pcm 2 bytes
-  if (whisper->s_idx >= SEND_BUF_SIZE) {
+
+  if (whisper->s_idx >= PACKET_SAMPLES * 2) {
+    whisper->ready_buf = whisper->active_buf; // hand off full buffer
+    whisper->active_buf ^= 1; // switch to other buffer
     SET_RDY(whisper->pkt_rdy, SEND);
     whisper->s_idx = 0;
   }
 }
 
 // polls the microphone for a clap
+/*
 void micDetection(mic_t* mic) {
   if (abs(mic->reading - noise_avg) > mic->threshold) {
     delay(10); // detect short burst of sound (ie clap)
@@ -239,14 +260,36 @@ void micDetection(mic_t* mic) {
     }
   }
 }
+*/
 
 // function to send udp packet of data from send_buf to
 // corresponding server destination
 void sendUDP(wifi_t* dest) {
+  int buf = dest->ready_buf;
+
+  uint16_t magic = MAGIC;
+  uint16_t seq = dest->seq++;
+  uint16_t n = PACKET_SAMPLES;
+
+  // checksum: xor all bytes
+  uint8_t checksum = 0;
+  for (int i = HEADER_SIZE; i < SEND_BUF_SIZE; i++) {
+    checksum ^= (uint8_t)dest->send_buf[buf][i];
+  }
+  uint16_t checksum16 = checksum;
+
+  // assemble header
+  memcpy((void*)&dest->send_buf[buf][0], &magic, 2);
+  memcpy((void*)&dest->send_buf[buf][2], &seq, 2);
+  memcpy((void*)&dest->send_buf[buf][4], &n, 2);
+  memcpy((void*)&dest->send_buf[buf][6], &checksum16, 2);
+
+
+  // send packet
   IPAddress ip(dest->serverIP[0], dest->serverIP[1],
                dest->serverIP[2], dest->serverIP[3]);
   udp.beginPacket(ip, dest->serverPort);
-  udp.write((uint8_t*)dest->send_buf, sizeof(dest->send_buf));
+  udp.write((uint8_t*)dest->send_buf[buf], SEND_BUF_SIZE);
   udp.endPacket();
 }
 
@@ -309,8 +352,7 @@ void loop() {
                              // later, will be chosen based off command
   }
   mic_t * mic = (mic_t*)devtab[MICID][0];
-  noise_avg = (noise_avg * 63 + mic->reading) / 64;
-
+  baseline = (baseline * 0.999f) + (mic->reading * 0.001f); 
 
   // poll mic for loud noise (ie clap) to toggle
   // prob switch to interrupts using LM393 chip to be more
@@ -320,14 +362,10 @@ void loop() {
   wifi_t * whisper = (wifi_t*)devtab[WIFIID][0];
   if (CHECK_RDY(whisper->pkt_rdy, SEND)) {
     sendUDP(whisper);
+    Serial.println("pkt sent");
     CLEAR_RDY(whisper->pkt_rdy, SEND);
   }
   recvUDP(whisper); // check for packet (if r_len > 0)
-
-  /*
-  memcpy((void*)&whisper->send_buf, "HELLO WORLD", 11);
-  sendUDP(whisper);
-  */
 
   // if command received, process and execute
   if (CHECK_RDY(whisper->pkt_rdy, RECV)) {
