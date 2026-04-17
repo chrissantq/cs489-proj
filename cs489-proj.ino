@@ -27,7 +27,6 @@
 #define HEADER_SIZE 8 // 2 magic + 2 seq + 2 n samples + 2 checksum
 #define SEND_BUF_SIZE (PACKET_SAMPLES * 2 + HEADER_SIZE) // 648 bytes
 #define RECV_BUF_SIZE 120 // recv buf smaller, just simple commands
-#define GAIN 16.0f
 
 // other constants
 #define DEBOUNCE 200 // ignore button inputs within 200ms of last
@@ -165,7 +164,7 @@ void devinit() {
   mic = (mic_t*)malloc(sizeof(mic_t));
   mic->devnum = 0;
   mic->threshold = 300;
-  mic->pin = A5;
+  mic->pin = A0;
   mic->reading = 0;
   memset(mic->buffer, 0, sizeof(mic->buffer));
   devtab[MICID][mic->devnum] = mic;
@@ -183,7 +182,6 @@ void setup() {
   pinMode(LATCHPIN, OUTPUT);
   pinMode(AUDIOPIN, OUTPUT);
   pinMode(TOGGLEPIN, INPUT_PULLUP);
-  analogReadResolution(12);
 
   // interrupt for button
   attachInterrupt(digitalPinToInterrupt(TOGGLEPIN), toggleISR, FALLING);
@@ -193,23 +191,31 @@ void setup() {
   devinit();
   Serial.println("Devices initialized.");
 
-  baseline_int = (int)baseline;
+  // "kick" adc
+  analogReadResolution(12);
+  analogRead(mic->pin);
 
-  // bypass using analogRead
-  R_ADC0->ADCSR_b.ADST = 1;
+  // set up continuous ADC register reading instead of analogRead()
+  R_ADC0->ADANSA[0] = (1 << 9); // ADC channel select reg A, group 0 (AN009 for A0)
+  R_ADC0->ADCER = 0x0000; // set 12 bit resolution (bits 2:1 = 00) and r-aligned output (bit 15 = 0)
+  R_ADC0->ADCSR = (0b10 << 13) | (1 << 15); // set ADCS to 10 (cont scan)
+                                            // set ADST bit (starts ADC)
+
+  // wait a moment for ADC to stabilize and get initial baseline
+  delay(10);
+  baseline = (float)R_ADC0->ADDR[9];
+  baseline_int = (int)baseline;
 
   // audio timer setup
   uint8_t timer_type = GPT_TIMER;
   int8_t timer_idx = FspTimer::get_available_timer(timer_type);
   audioTimer.begin(TIMER_MODE_PERIODIC, timer_type, timer_idx,
-                   16000, 0.0, audioSampleISR);
+                   16000, 0, audioSampleISR);
   audioTimer.setup_overflow_irq();
   audioTimer.open();
   audioTimer.start();
 
   Serial.println("Audio timer started.");
-
-  baseline = analogRead(mic->pin);
 
 }
 
@@ -240,14 +246,13 @@ void updateRelay(relay_t* relay) {
 void audioSampleISR(timer_callback_args_t* args) {
 
   // read and trigger next reading immediately
-  int reading = R_ADC0->ADDR[5];
-  R_ADC0->ADCSR_b.ADST = 1; 
+  int reading = (int)R_ADC0->ADDR[9]; // ADC writes latest res for AN009 (A0)
 
   if (!mic || !whisper) return;
 
   mic->reading = reading;
 
-  // get pcm (gain is 16 -> << 4)
+  // get pcm (<< 4 for gain, gives more range)
   int pcm_val = (reading - baseline_int) << 4;
 
   // clamp values
@@ -259,7 +264,7 @@ void audioSampleISR(timer_callback_args_t* args) {
   int s_idx = whisper->s_idx;
   int active = whisper->active_buf;
 
-  // direct assign to buffer
+  // direct assign to buffer (both little endian)
   *(int16_t*)&whisper->send_buf[active][HEADER_SIZE + s_idx] = pcm;
   s_idx += 2;
 
