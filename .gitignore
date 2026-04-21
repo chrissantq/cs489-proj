@@ -1,0 +1,19 @@
+# macOS
+.DS_Store
+
+# VS Code workspace-local settings
+.vscode/
+
+# Qt Creator local project state
+controller_app/.qtcreator/
+
+# CMake and Qt build output
+build/
+controller_app/build/
+cmake-build-*/
+
+# Generated CMake metadata
+compile_commands.json
+
+# Compiled binaries
+voice_server/voice_server

@@ -1,0 +1,7 @@
+<RCC>
+    <qresource prefix="/images">
+        <file>Resources/logo.png</file>
+        <file>Resources/add_device.png</file>
+        <file>Resources/settings.png</file>
+    </qresource>
+</RCC>
