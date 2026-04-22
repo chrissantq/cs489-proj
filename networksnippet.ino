@@ -4,7 +4,7 @@
 
 IPAddress bulbIP(192, 168, 1, 70); // SET PROPERLY SOMEWHERE
 
-void updateNetworkDevice(int instrType, int onOff, int r, int g, int b) {
+void updateNetworkDevice(int instrType, int r, int g, int b) {
 
     String msg;
 
