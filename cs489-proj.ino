@@ -21,6 +21,11 @@
 #define WIRELESSID 1
 #define MICID 2
 
+// bulb instr constants
+#define INSTR_TYPE_ON 0
+#define INSTR_TYPE_OFF 1
+#define INSTR_TYPE_COLOR 2
+
 // other constants
 #define DEBOUNCE 200 // ignore button inputs within 200ms of last
 #define CLAP_EXPIRE_TIME 2000 // 2 seconds
@@ -60,6 +65,7 @@ WiFiUDP udp;
 const char * ssid = "McDonald's Free Wifi";
 const char * pass = "AKAK608Waldro";
 
+IPAddress bulbIP(192, 168, 1, 70);
 IPAddress local_IP(192, 168, 1, 23);
 IPAddress gateway(192, 168, 1, 25);
 IPAddress subnet(255, 255, 255, 0);
@@ -257,6 +263,37 @@ int parseAppCmd() {
   } else {
     return 0;
   }
+}
+
+void updateNetworkDevice(int instrType, int r, int g, int b) {
+
+  String msg;
+
+  switch (instrType) {
+
+    case INSTR_TYPE_ON:
+      msg = "{\"method\":\"setPilot\",\"params\":{\"state\":true}}";
+      break;
+
+    case INSTR_TYPE_OFF;
+      msg = "{\"method\":\"setPilot\",\"params\":{\"state\":false}}";
+      break;
+
+    case INSTR_TYPE_COLOR:
+      msg = "{\"method\":\"setPilot\",\"params\":{";
+      msg += "\"r\":" + String(r);
+      msg += ",\"g\":" + String(g);
+      msg += ",\"b\":" + String(b);
+      msg += ",\"dimming\":100}}";
+      break;
+
+    default:
+      return;
+  }
+
+  udp.beginPacket(bulbIP, 38899);
+  udp.write((const uint8_t*)msg.c_str(), msg.length());
+  udp.endPacket();
 }
 
 void loop() {
